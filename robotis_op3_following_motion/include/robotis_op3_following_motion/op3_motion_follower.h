@@ -103,6 +103,7 @@ class MotionFollower
   void goInitPose();
   void setModule(const std::__cxx11::string &module_name);
   void parseInit();
+  bool getShoulderLength(const openpose_ros_msgs::PersonDetection &person, double &length);
   void calcJointStates(const openpose_ros_msgs::PersonDetection &person_to_follow);
   void publishJointStates();
 

@@ -68,11 +68,30 @@ void MotionFollower::humanPoseCallback(const openpose_ros_msgs::Persons::ConstPt
   if(msg->persons.size() == 0)
     return;
 
-  ROS_INFO_STREAM("Pose message!! - " << msg->persons.size());
   //  person_to_follow_ = msg->persons.front();
 
-  // calc joint angle of ROBOTIS-OP3 to follow the motion of person who is recognized at first.
-  calcJointStates(msg->persons.front());
+  // calc joint angle of ROBOTIS-OP3 to follow the motion of person who is the closest
+  int closest_index = -1;
+  double shoulder_size = 0.0;
+  for(int ix = 0; ix < msg->persons.size(); ix++)
+  {
+    double s_length = 0.0;
+    // get length : shoulder + neck
+    bool result = getShoulderLength(msg->persons[ix], s_length);
+    // check the largest
+    if(result == true && s_length > shoulder_size)
+    {
+      shoulder_size = s_length;
+      closest_index = ix;
+    }
+  }
+
+  if(closest_index == -1)
+    return;
+
+  ROS_INFO_STREAM("Pose message[" << msg->persons.size() << "] : " << closest_index);
+  calcJointStates(msg->persons[closest_index]);
+  //calcJointStates(msg->persons.front());
 
   // publish joint angle
   publishJointStates();
@@ -163,6 +182,54 @@ void MotionFollower::parseInit()
 
     joint_angles_[joint_name] = value * M_PI / 180.0;
   }
+}
+
+bool MotionFollower::getShoulderLength(const openpose_ros_msgs::PersonDetection &person, double& length)
+{
+  Eigen::Vector2d neck(0.0, 0.0), r_shoulder(0.0, 0.0), l_shoulder(0.0, 0.0), nose(0.0, 0.0);
+  double r_sho_len = 0.0, l_sho_len = 0.0, nose_len = 0.0;
+
+  for(int ix = 0; ix < person.body_part.size(); ix++)
+  {
+    openpose_ros_msgs::BodyPartDetection body_part = person.body_part[ix];
+    if(body_part.part_id == Neck)
+    {
+      if(body_part.confidence == 0.0)
+        return false;
+      neck = Eigen::Vector2d(body_part.x, body_part.y);
+    }
+    if(body_part.part_id == RShoulder)
+    {
+      r_shoulder = Eigen::Vector2d(body_part.x, body_part.y);
+    }
+    if(body_part.part_id == LShoulder)
+    {
+      l_shoulder = Eigen::Vector2d(body_part.x, body_part.y);
+    }
+    if(body_part.part_id == Nose)
+    {
+      nose = Eigen::Vector2d(body_part.x, body_part.y);
+    }
+  }
+
+  if(r_shoulder != Eigen::Vector2d(0.0, 0.0))
+  {
+    Eigen::Vector2d r_len_vec = r_shoulder - neck;
+    r_sho_len = r_len_vec.norm();
+  }
+  if(l_shoulder != Eigen::Vector2d(0.0, 0.0))
+  {
+    Eigen::Vector2d l_len_vec = l_shoulder - neck;
+    l_sho_len = l_len_vec.norm();
+  }
+  if(nose != Eigen::Vector2d(0.0, 0.0))
+  {
+    Eigen::Vector2d nose_len_vec = nose - neck;
+    nose_len = nose_len_vec.norm();
+  }
+
+  length = r_sho_len + l_sho_len + nose_len;
+  return true;
 }
 
 void MotionFollower::calcJointStates(const openpose_ros_msgs::PersonDetection &person_to_follow)
