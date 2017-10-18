@@ -39,6 +39,7 @@ MotionFollower::MotionFollower()
     MODULE_NAME("direct_control_module"),
     l_shoulder_3d_(0, 0, 0),
     is_ready_(false),
+    is_playable_(false),
     DEBUG_PRINT(false)
 {
   human_pose_sub_ = nh_.subscribe("/openpose/pose", 1, &MotionFollower::humanPoseCallback, this);
@@ -46,10 +47,10 @@ MotionFollower::MotionFollower()
   op3_joints_pub_ = nh_.advertise<sensor_msgs::JointState>("/robotis/direct_control/set_joint_states", 0);
   dxl_torque_pub_ = nh_.advertise<std_msgs::String>("/robotis/dxl_torque", 0);
   set_module_pub_ = nh_.advertise<std_msgs::String>("/robotis/enable_ctrl_module", 0);
+  init_pose_pub_ = nh_.advertise<std_msgs::String>("/robotis/base/ini_pose", 0);
 
-  std_msgs::String module_name;
-  module_name.data = "direct_control_module";
-  set_module_pub_.publish(module_name);
+  get_module_client_ = nh_.serviceClient<robotis_controller_msgs::GetJointModule>(
+      "/robotis/get_present_joint_ctrl_modules");
 
   joint_angles_.clear();
 }
@@ -61,17 +62,15 @@ MotionFollower::~MotionFollower()
 
 void MotionFollower::humanPoseCallback(const openpose_ros_msgs::Persons::ConstPtr& msg)
 {
-  if(is_ready_ == false)
+  if(is_ready_ == false || is_playable_ == false)
     return;
 
   // check human pose data
   if(msg->persons.size() == 0)
     return;
 
-  //  person_to_follow_ = msg->persons.front();
-
   // calc joint angle of ROBOTIS-OP3 to follow the motion of person who is the closest
-  int closest_index = -1;
+  int index_of_closest_person = -1;
   double shoulder_size = 0.0;
   for(int ix = 0; ix < msg->persons.size(); ix++)
   {
@@ -82,16 +81,15 @@ void MotionFollower::humanPoseCallback(const openpose_ros_msgs::Persons::ConstPt
     if(result == true && s_length > shoulder_size)
     {
       shoulder_size = s_length;
-      closest_index = ix;
+      index_of_closest_person = ix;
     }
   }
 
-  if(closest_index == -1)
+  if(index_of_closest_person == -1)
     return;
 
-  ROS_INFO_STREAM("Pose message[" << msg->persons.size() << "] : " << closest_index);
-  calcJointStates(msg->persons[closest_index]);
-  //calcJointStates(msg->persons.front());
+  ROS_INFO_STREAM("Pose message[" << msg->persons.size() << "] : " << index_of_closest_person);
+  calcJointStates(msg->persons[index_of_closest_person]);
 
   // publish joint angle
   publishJointStates();
@@ -99,14 +97,33 @@ void MotionFollower::humanPoseCallback(const openpose_ros_msgs::Persons::ConstPt
 
 void MotionFollower::buttonCallback(const std_msgs::String::ConstPtr& msg)
 {
-  // if user button is pressed, OP3 will torque on and go init pose
-  if(msg->data == "user")
+  // if mode button is pressed, OP3 will torque on and go init pose
+  if(msg->data == "mode")
   {
     // check torque
     checkTorque();
 
+    // handle Module
+    handleModule();
+
     // go init pose and start following demo
     goInitPose();
+
+    is_playable_ = true;
+  }
+  else if(msg->data == "start")
+  {
+    // start and pause
+    handlePlaying();
+
+  }
+  else if(msg->data == "user")
+  {
+    // go init of base_module
+    setBaseInitPose();
+
+    is_ready_ = false;
+    is_playable_ = false;
   }
 }
 
@@ -117,29 +134,32 @@ void MotionFollower::checkTorque()
 
   // send command to op3_manager in order to check the torque condition of OP3
   dxl_torque_pub_.publish(check_msg);
+
+  // wait for checking torque
+  usleep(40 * 1000);
 }
 
 void MotionFollower::goInitPose()
 {
-  // set module to direct_control_module
-  setModule("none");
-
-  usleep(20 * 1000);
-
-  is_ready_ = false;
-
-  setModule(MODULE_NAME);
-
-  usleep(20 * 1000);
-
   // go init pose from yaml file
   parseInit();
 
   publishJointStates();
 
-  usleep(2.5 * 1000 * 1000);
+  // wait for goint to init pose.
+  usleep(3 * 1000 * 1000);
 
+  // set ready flag
   is_ready_ = true;
+}
+
+void MotionFollower::handleModule()
+{
+  // set module to DIRECT_CONTROL
+  setModule(MODULE_NAME);
+
+  // wait to setting completed
+  usleep(20 * 1000);
 }
 
 void MotionFollower::setModule(const std::string &module_name)
@@ -149,6 +169,14 @@ void MotionFollower::setModule(const std::string &module_name)
   module_msg.data = module_name;
 
   set_module_pub_.publish(module_msg);
+}
+
+void MotionFollower::handlePlaying()
+{
+  if(is_ready_ == false)
+    return;
+
+  is_playable_ = !is_playable_;
 }
 
 void MotionFollower::parseInit()
@@ -182,6 +210,14 @@ void MotionFollower::parseInit()
 
     joint_angles_[joint_name] = value * M_PI / 180.0;
   }
+}
+
+void MotionFollower::setBaseInitPose()
+{
+  std_msgs::String init_msg;
+  init_msg.data = "ini_pose";
+
+  init_pose_pub_.publish(init_msg);
 }
 
 bool MotionFollower::getShoulderLength(const openpose_ros_msgs::PersonDetection &person, double& length)
@@ -302,7 +338,6 @@ void MotionFollower::calcJointStates(const openpose_ros_msgs::PersonDetection &p
     if(shoulder_direction.coeff(2) > 0)
       l_shoulder_roll *= (-1);
 
-    //if(calc_result == true)
     ROS_INFO_STREAM_COND(DEBUG_PRINT, "Left_Shoulder: [Roll] " << (l_shoulder_roll * 180 / M_PI) << ", [Pitch] " << (l_shoulder_pitch * 180 / M_PI));
 
     checkMaxAngle(80 * M_PI / 180.0, l_shoulder_roll);
@@ -322,8 +357,8 @@ void MotionFollower::calcJointStates(const openpose_ros_msgs::PersonDetection &p
     double r_shoulder_roll = 0.0, r_shoulder_pitch = 0.0;
 
     ROS_INFO_STREAM_COND(DEBUG_PRINT, "Neck : (" << body_position_[Neck].coeff(0) << ", " << body_position_[Neck].coeff(1)
-                         << "), LShoulder : (" << body_position_[RShoulder].coeff(0) << ", " << body_position_[RShoulder].coeff(1)
-                         << "), LElbow : (" << body_position_[RElbow].coeff(0) << ", " << body_position_[RElbow].coeff(1) << ")");
+                         << "), RShoulder : (" << body_position_[RShoulder].coeff(0) << ", " << body_position_[RShoulder].coeff(1)
+                         << "), RElbow : (" << body_position_[RElbow].coeff(0) << ", " << body_position_[RElbow].coeff(1) << ")");
 
     Eigen::Vector2d neck_vector = body_position_[Neck] - body_position_[RShoulder];
     Eigen::Vector2d shoulder_vector = body_position_[RShoulder] - body_position_[RElbow];
@@ -369,7 +404,7 @@ void MotionFollower::calcJointStates(const openpose_ros_msgs::PersonDetection &p
       r_shoulder_roll *= (-1);
 
     //if(calc_result == true)
-    ROS_INFO_STREAM_COND(DEBUG_PRINT, "Left_Shoulder: [Roll] " << (r_shoulder_roll * 180 / M_PI) << ", [Pitch] " << (r_shoulder_pitch * 180 / M_PI));
+    ROS_INFO_STREAM_COND(DEBUG_PRINT, "Right_Shoulder: [Roll] " << (r_shoulder_roll * 180 / M_PI) << ", [Pitch] " << (r_shoulder_pitch * 180 / M_PI));
 
     checkMaxAngle(80 * M_PI / 180.0, r_shoulder_roll);
     joint_angles_["r_sho_pitch"] = r_shoulder_pitch;
@@ -396,7 +431,7 @@ void MotionFollower::calcJointStates(const openpose_ros_msgs::PersonDetection &p
     Eigen::Vector2d shoulder_vector = body_position_[LShoulder] - body_position_[LElbow];
     Eigen::Vector2d elbow_vector = body_position_[LElbow] - body_position_[LWrist];
     Eigen::Vector2d arm_vector = body_position_[LShoulder] - body_position_[LWrist];
-    ROS_INFO_STREAM("L-Elbow : (" << elbow_vector.coeff(0) << ", " << elbow_vector.coeff(1) << ")");
+    ROS_INFO_STREAM_COND(DEBUG_PRINT, "L-Elbow : (" << elbow_vector.coeff(0) << ", " << elbow_vector.coeff(1) << ")");
 
     calc_result = calcJointAngle(shoulder_vector,elbow_vector, l_elbow);
 
@@ -423,9 +458,6 @@ void MotionFollower::calcJointStates(const openpose_ros_msgs::PersonDetection &p
         joint_angles_["l_sho_pitch"] = - joint_angles_["l_sho_pitch"];
     }
 
-    //    if(calc_result == true)
-    //      ROS_INFO_STREAM("Left_Elbow : " << (l_elbow * 180 / M_PI));
-
     checkMaxAngle(120 * M_PI / 180.0, l_elbow);
     joint_angles_["l_el"] = l_elbow;
   }
@@ -439,9 +471,9 @@ void MotionFollower::calcJointStates(const openpose_ros_msgs::PersonDetection &p
     double r_elbow = 0.0;
     calc_result = false;
 
-    ROS_INFO_STREAM_COND(DEBUG_PRINT, "LShoulder : (" << body_position_[RShoulder].coeff(0) << ", " << body_position_[RShoulder].coeff(1)
-                         << "), LElbow : (" << body_position_[RElbow].coeff(0) << ", " << body_position_[RElbow].coeff(1)
-                         << "), LWrist : (" << body_position_[RWrist].coeff(0) << ", " << body_position_[RWrist].coeff(1) << ")");
+    ROS_INFO_STREAM_COND(DEBUG_PRINT, "RShoulder : (" << body_position_[RShoulder].coeff(0) << ", " << body_position_[RShoulder].coeff(1)
+                         << "), RElbow : (" << body_position_[RElbow].coeff(0) << ", " << body_position_[RElbow].coeff(1)
+                         << "), RWrist : (" << body_position_[RWrist].coeff(0) << ", " << body_position_[RWrist].coeff(1) << ")");
 
     Eigen::Vector2d shoulder_vector = body_position_[RShoulder] - body_position_[RElbow];
     Eigen::Vector2d elbow_vector = body_position_[RElbow] - body_position_[RWrist];
@@ -449,9 +481,6 @@ void MotionFollower::calcJointStates(const openpose_ros_msgs::PersonDetection &p
     ROS_INFO_STREAM_COND(DEBUG_PRINT, "R-Elbow : (" << elbow_vector.coeff(0) << ", " << elbow_vector.coeff(1) << ")");
 
     calc_result = calcJointAngle(shoulder_vector, elbow_vector, r_elbow);
-
-    //    if(calc_result == true)
-    //      ROS_INFO_STREAM("Right_Elbow : " << (r_elbow * 180 / M_PI));
 
     Eigen::Vector3d elbow_vector_3d, arm_vector_3d;
     elbow_vector_3d << elbow_vector , 0;

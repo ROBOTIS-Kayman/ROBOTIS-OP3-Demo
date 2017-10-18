@@ -47,6 +47,7 @@
 
 #include "openpose_ros_msgs/Persons.h"
 #include "robotis_math/robotis_linear_algebra.h"
+#include "robotis_controller_msgs/GetJointModule.h"
 
 namespace robotis_op
 {
@@ -101,8 +102,11 @@ class MotionFollower
 
   void checkTorque();
   void goInitPose();
-  void setModule(const std::__cxx11::string &module_name);
+  void handleModule();
+  void setModule(const std::string &module_name);
+  void handlePlaying();
   void parseInit();
+  void setBaseInitPose();
   bool getShoulderLength(const openpose_ros_msgs::PersonDetection &person, double &length);
   void calcJointStates(const openpose_ros_msgs::PersonDetection &person_to_follow);
   void publishJointStates();
@@ -120,6 +124,9 @@ class MotionFollower
   ros::Publisher op3_joints_pub_;
   ros::Publisher dxl_torque_pub_;
   ros::Publisher set_module_pub_;
+  ros::Publisher init_pose_pub_;
+
+  ros::ServiceClient get_module_client_;
 
   // variable
   openpose_ros_msgs::PersonDetection person_to_follow_;
@@ -129,6 +136,7 @@ class MotionFollower
   Eigen::Vector3d l_shoulder_3d_, r_shoulder_3d_;
 
   bool is_ready_;
+  bool is_playable_;
 };
 }
 

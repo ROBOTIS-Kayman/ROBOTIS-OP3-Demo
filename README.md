@@ -1,3 +1,2 @@
-# ROBOTIS-OP3-Demo
+# ROBOTIS-OP3 motion following demo using openpose_ros
 
-This repository is personal and all of code is for test.
