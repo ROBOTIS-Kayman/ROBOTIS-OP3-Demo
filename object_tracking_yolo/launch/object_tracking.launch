@@ -1,0 +1,11 @@
+<?xml version="1.0"?>
+<launch>
+  <arg name="config_path" default="$(find op3_ball_detector)/config/ball_detector_params.yaml"/>
+    
+  <!-- ball detector -->
+  <node pkg="object_tracking_yolo" type="object_tracking_yolo_node" name="object_tracking_yolo_node" args="" output="screen">
+    <param name="p_gain" type="double" value="0.2"/>
+  </node>
+</launch>
+
+
