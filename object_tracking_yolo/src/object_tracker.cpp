@@ -27,6 +27,7 @@ ObjectTracker::ObjectTracker()
     FOV_HEIGHT(21.6 * M_PI / 180),
     NOT_FOUND_THRESHOLD(50),
     WAITING_THRESHOLD(5),
+    INIT_POSE_INDEX(1),
     use_head_scan_(true),
     count_not_found_(0),
     on_tracking_(false),
@@ -36,10 +37,10 @@ ObjectTracker::ObjectTracker()
     y_error_sum_(0),
     object_current_size_(0),
     tracking_status_(NotFound),
-    COMMAND_START("sports ball"),
-    COMMAND_STOP("teddy bear"),
-    COMMAND_SPEAK("banana"),
-    TARGET_OBJECT("cell phone"),
+    object_start_command_("sports ball"),
+    object_stop_command_("teddy bear"),
+    object_speak_command_("banana"),
+    object_target_("cell phone"),
     DEBUG_PRINT(true)
 {
   ros::NodeHandle param_nh("~");
@@ -53,12 +54,16 @@ ObjectTracker::ObjectTracker()
 
   ROS_INFO_STREAM("Object tracking Gain : " << p_gain_ << ", " << i_gain_ << ", " << d_gain_);
 
+  set_module_pub_ = nh_.advertise<std_msgs::String>("/robotis/enable_ctrl_module", 0);
   head_joint_pub_ = nh_.advertise<sensor_msgs::JointState>("/robotis/head_control/set_joint_states_offset", 0);
-//  head_scan_pub_ = nh_.advertise<std_msgs::String>("/robotis/head_control/scan_command", 0);
+  led_pub_ = nh_.advertise<robotis_controller_msgs::SyncWriteItem>("/robotis/sync_write_item", 0);
+  motion_index_pub_ = nh_.advertise<std_msgs::Int32>("/robotis/action/page_num", 0);
+  //  head_scan_pub_ = nh_.advertise<std_msgs::String>("/robotis/head_control/scan_command", 0);
   //  error_pub_ = nh_.advertise<std_msgs::Float64MultiArray>("/ball_tracker/errors", 0);
 
   object_sub_ = nh_.subscribe("/darknet_ros/bounding_boxes", 1, &ObjectTracker::objectCallback, this);
-//  ball_tracking_command_sub_ = nh_.subscribe("/ball_tracker/command", 1, &ObjectTracker::ballTrackerCommandCallback, this);
+  buttuon_sub_ = nh_.subscribe("/robotis/open_cr/button", 1, &ObjectTracker::buttonHandlerCallback, this);
+  //  ball_tracking_command_sub_ = nh_.subscribe("/ball_tracker/command", 1, &ObjectTracker::ballTrackerCommandCallback, this);
 
   test_sub_ = nh_.subscribe("/ros_command", 1, &ObjectTracker::getROSCommand, this);
 }
@@ -126,8 +131,8 @@ int ObjectTracker::processTracking()
 
   if (on_tracking_ == false)
   {
-//    object_position_.z = 0;
-//    count_not_found_ = 0;
+    //    object_position_.z = 0;
+    //    count_not_found_ = 0;
     return NotFound;
   }
 
@@ -145,7 +150,7 @@ int ObjectTracker::processTracking()
     }
     else if (count_not_found_ > NOT_FOUND_THRESHOLD)
     {
-//      scanBall();
+      //      scanBall();
       count_not_found_ = 0;
       tracking_status = NotFound;
     }
@@ -307,17 +312,48 @@ void ObjectTracker::objectCallback(const darknet_ros_msgs::BoundingBoxes::ConstP
   getTargetFromMsg(msg);
 }
 
+void ObjectTracker::buttonHandlerCallback(const std_msgs::String::ConstPtr &msg)
+{
+  // msg->data
+
+  if (msg->data == "mode_long")
+  {
+    // setLED(0x01 | 0x02 | 0x04);
+  }
+  else if (msg->data == "user_long")
+  {
+    // it's using in op3_manager
+    // torque on and going to init pose
+  }
+  else if (msg->data == "start")
+  {
+    if(on_tracking_ == true)
+    {
+      stopTracking();
+    }
+    else
+    {
+      startTracking();
+    }
+
+  }
+  else if (msg->data == "mode")
+  {
+
+  }
+}
+
 int ObjectTracker::getCommandFromObject(const darknet_ros_msgs::BoundingBoxes::ConstPtr &msg)
 {
   int command = NoCommand;
 
   for(int ix = 0; ix < msg->bounding_boxes.size(); ix++)
   {
-    if(msg->bounding_boxes[ix].Class == COMMAND_START)
+    if(msg->bounding_boxes[ix].Class == object_start_command_)
       command = StartTracking;
-    else if(msg->bounding_boxes[ix].Class == COMMAND_STOP)
+    else if(msg->bounding_boxes[ix].Class == object_stop_command_)
       command = StopTracking;
-    else if(msg->bounding_boxes[ix].Class == COMMAND_SPEAK)
+    else if(msg->bounding_boxes[ix].Class == object_speak_command_)
       command = SpeakObject;
   }
 
@@ -330,8 +366,10 @@ void ObjectTracker::getTargetFromMsg(const darknet_ros_msgs::BoundingBoxes::Cons
   {
     darknet_ros_msgs::BoundingBox& bounding_box = (darknet_ros_msgs::BoundingBox&) (msg->bounding_boxes[ix]);
     // darknet_ros_msgs::BoundingBox *bounding_box = static_cast<darknet_ros_msgs::BoundingBox*>(&(msg->bounding_boxes[ix]));
-    if(bounding_box.Class == TARGET_OBJECT)
+    if(bounding_box.Class == object_target_)
     {
+      prev_position_ = object_position_;
+
       object_position_.x = (bounding_box.xmax + bounding_box.xmin) / 1280.0 - 1.0;
       object_position_.y = (bounding_box.ymax + bounding_box.ymin) / 720.0 - 1.0;
 
@@ -340,6 +378,7 @@ void ObjectTracker::getTargetFromMsg(const darknet_ros_msgs::BoundingBoxes::Cons
       object_position_.z = sqrt(object_x * object_x + object_y * object_y);
 
       ROS_ERROR_COND(DEBUG_PRINT, "Found Object");
+
       return;
     }
   }
@@ -359,24 +398,75 @@ void ObjectTracker::getROSCommand(const std_msgs::String::ConstPtr &msg)
 void ObjectTracker::getConfig(const std::string &config_path)
 {
   if(config_path == "")
+  {
+    ROS_ERROR("wrong path for getting config");
     return;
+  }
 
   YAML::Node doc;
   try
   {
     // load yaml
     doc = YAML::LoadFile(config_path.c_str());
+
+    // object : start, stop, target
+    YAML::Node object_node = doc["object"];
+    object_start_command_ = object_node["start_command"].as<std::string>();
+    object_stop_command_ = object_node["stop_command"].as<std::string>();
+    object_target_ = object_node["target"].as<std::string>();
+
+    // example
+    // for (YAML::iterator yaml_it = tar_pose_node.begin(); yaml_it != tar_pose_node.end(); ++yaml_it)
+    // joint_name = yaml_it->first.as<std::string>();
+    // value = yaml_it->second.as<double>();
   } catch (const std::exception& e)
   {
-    ROS_ERROR("Fail to load yaml file.");
+    ROS_ERROR("Fail to load config file.");
     return;
   }
-
-  // object : start, stop, target
-
-  //
 }
 
+void ObjectTracker::setModule(const std::string &module_name)
+{
+  // set module to direct_control_module for this demonsration
+  std_msgs::String module_msg;
+  module_msg.data = module_name;
+
+  set_module_pub_.publish(module_msg);
+}
+
+void ObjectTracker::setLED(const int led_value)
+{
+
+  robotis_controller_msgs::SyncWriteItem syncwrite_msg;
+  syncwrite_msg.item_name = "LED";
+  syncwrite_msg.joint_name.push_back("open-cr");
+  syncwrite_msg.value.push_back(led_value);
+
+  led_pub_.publish(syncwrite_msg);
+}
+
+void ObjectTracker::readyToDemo()
+{
+  // set to action_module
+  setModule("action_module");
+
+  // go demo pose
+  playMotion(INIT_POSE_INDEX);
+
+  usleep(1500 * 1000);
+
+  // set to head_control_module
+  setModule("head_control_module");
+}
+
+void ObjectTracker::playMotion(int motion_index)
+{
+  std_msgs::Int32 motion_msg;
+  motion_msg.data = motion_index;
+
+  motion_index_pub_.publish(motion_msg);
+}
 
 }
 

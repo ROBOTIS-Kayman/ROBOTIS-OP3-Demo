@@ -9,7 +9,9 @@ add_compile_options(-std=c++11)
 ## is used, also find other catkin packages
 find_package(catkin REQUIRED COMPONENTS
   darknet_ros_msgs
+  robotis_controller_msgs
   roscpp
+  roslib
 )
 
 ## System dependencies are found with CMake's conventions

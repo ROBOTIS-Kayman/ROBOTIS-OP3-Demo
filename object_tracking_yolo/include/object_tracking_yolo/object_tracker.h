@@ -23,11 +23,13 @@
 #include <ros/ros.h>
 #include <ros/package.h>
 #include <std_msgs/String.h>
+#include <std_msgs/Int32.h>
 #include <sensor_msgs/JointState.h>
 #include <geometry_msgs/Point.h>
 #include <yaml-cpp/yaml.h>
 
 #include "darknet_ros_msgs/BoundingBoxes.h"
+#include "robotis_controller_msgs/SyncWriteItem.h"
 
 namespace robotis_op
 {
@@ -36,6 +38,9 @@ namespace robotis_op
 class ObjectTracker
 {
 public:
+  // const
+
+  // enum
   enum TrackingStatus
   {
     NotFound = -1,
@@ -51,6 +56,8 @@ public:
     SpeakObject = 2,
   };
 
+
+  // method
   ObjectTracker();
   ~ObjectTracker();
 
@@ -76,38 +83,50 @@ public:
     return object_current_size_;
   }
 
+  // variable
+
 protected:
   const double FOV_WIDTH;
   const double FOV_HEIGHT;
   const int NOT_FOUND_THRESHOLD;
   const int WAITING_THRESHOLD;
   const bool DEBUG_PRINT;
-  const std::string COMMAND_START;
-  const std::string COMMAND_STOP;
-  const std::string COMMAND_SPEAK;
-  const std::string TARGET_OBJECT;
+  const int INIT_POSE_INDEX;
+  std::string object_start_command_;
+  std::string object_stop_command_;
+  std::string object_speak_command_;
+  std::string object_target_;
 
-//  void ballPositionCallback(const op3_ball_detector::CircleSetStamped::ConstPtr &msg);
-//  void objectTrackerCommandCallback(const std_msgs::String::ConstPtr &msg);
   void objectCallback(const darknet_ros_msgs::BoundingBoxes::ConstPtr &msg);
+  void buttonHandlerCallback(const std_msgs::String::ConstPtr &msg);
   void publishHeadJoint(double pan, double tilt);
-//void scanBall();
+
   int getCommandFromObject(const darknet_ros_msgs::BoundingBoxes::ConstPtr &msg);
   void getTargetFromMsg(const darknet_ros_msgs::BoundingBoxes::ConstPtr &msg);
 
+  void getConfig(const std::string &config_path);
+  void setModule(const std::string &module_name);
+  void setLED(const int led_value);
+
+  void readyToDemo();
+  void playMotion(int motion_index);
+
   // test code
   void getROSCommand(const std_msgs::String::ConstPtr &msg);
-  void getConfig(const std::string &config_path);
 
   //ros node handle
   ros::NodeHandle nh_;
 
   //image publisher/subscriber
+  ros::Publisher set_module_pub_;
   ros::Publisher module_control_pub_;
   ros::Publisher head_joint_pub_;
+  ros::Publisher led_pub_;
+  ros::Publisher motion_index_pub_;
   ros::Publisher head_scan_pub_;
 
   ros::Subscriber object_sub_;
+  ros::Subscriber buttuon_sub_;
   ros::Subscriber ball_tracking_command_sub_;
 
   ros::Subscriber test_sub_;
@@ -115,6 +134,7 @@ protected:
   // (x, y) is the center position of the ball in image coordinates
   // z is the ball radius
   geometry_msgs::Point object_position_;
+  geometry_msgs::Point prev_position_;
 
   int tracking_status_;
   bool use_head_scan_;

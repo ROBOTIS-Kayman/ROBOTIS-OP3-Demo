@@ -22,5 +22,7 @@
   <!--   <test_depend>gtest</test_depend> -->
   <buildtool_depend>catkin</buildtool_depend>
   <depend>roscpp</depend>
+  <depend>roslib</depend>
   <depend>darknet_ros_msgs</depend>
+  <depend>robotis_controller_msgs</depend>
 </package>

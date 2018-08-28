@@ -2,4 +2,4 @@ object:
 
   start_command: sports ball
   stop_command : teddy bear
-  target_object : cell phone
+  target : cell phone
