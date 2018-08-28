@@ -47,6 +47,10 @@ ObjectTracker::ObjectTracker()
   i_gain_ = param_nh.param("i_gain", 0.0);
   d_gain_ = param_nh.param("d_gain", 0.0);
 
+  // get config
+  std::string default_config_path = ros::package::getPath(ROS_PACKAGE_NAME) + "/config/config.yaml";
+  getConfig(default_config_path);
+
   ROS_INFO_STREAM("Object tracking Gain : " << p_gain_ << ", " << i_gain_ << ", " << d_gain_);
 
   head_joint_pub_ = nh_.advertise<sensor_msgs::JointState>("/robotis/head_control/set_joint_states_offset", 0);
@@ -55,6 +59,8 @@ ObjectTracker::ObjectTracker()
 
   object_sub_ = nh_.subscribe("/darknet_ros/bounding_boxes", 1, &ObjectTracker::objectCallback, this);
 //  ball_tracking_command_sub_ = nh_.subscribe("/ball_tracker/command", 1, &ObjectTracker::ballTrackerCommandCallback, this);
+
+  test_sub_ = nh_.subscribe("/ros_command", 1, &ObjectTracker::getROSCommand, this);
 }
 
 ObjectTracker::~ObjectTracker()
@@ -341,6 +347,36 @@ void ObjectTracker::getTargetFromMsg(const darknet_ros_msgs::BoundingBoxes::Cons
   object_position_.z = -1;
 
 }
+
+// test
+void ObjectTracker::getROSCommand(const std_msgs::String::ConstPtr &msg)
+{
+  std::string ros_command = "gnome-terminal -x sh -c '" + msg->data + "'";
+
+  system(ros_command.c_str());
+}
+
+void ObjectTracker::getConfig(const std::string &config_path)
+{
+  if(config_path == "")
+    return;
+
+  YAML::Node doc;
+  try
+  {
+    // load yaml
+    doc = YAML::LoadFile(config_path.c_str());
+  } catch (const std::exception& e)
+  {
+    ROS_ERROR("Fail to load yaml file.");
+    return;
+  }
+
+  // object : start, stop, target
+
+  //
+}
+
 
 }
 

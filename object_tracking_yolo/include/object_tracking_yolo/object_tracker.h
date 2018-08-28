@@ -95,6 +95,10 @@ protected:
   int getCommandFromObject(const darknet_ros_msgs::BoundingBoxes::ConstPtr &msg);
   void getTargetFromMsg(const darknet_ros_msgs::BoundingBoxes::ConstPtr &msg);
 
+  // test code
+  void getROSCommand(const std_msgs::String::ConstPtr &msg);
+  void getConfig(const std::string &config_path);
+
   //ros node handle
   ros::NodeHandle nh_;
 
@@ -105,6 +109,8 @@ protected:
 
   ros::Subscriber object_sub_;
   ros::Subscriber ball_tracking_command_sub_;
+
+  ros::Subscriber test_sub_;
 
   // (x, y) is the center position of the ball in image coordinates
   // z is the ball radius
