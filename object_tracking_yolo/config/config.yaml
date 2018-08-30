@@ -1,5 +1,12 @@
 object:
-
   start_command: sports ball
   stop_command : teddy bear
-  target : cell phone
+  target : [cell phone, cup]
+  
+demo_ready:
+  motion_index : 1
+  head :
+    pan : 0.0
+    tilt : 0.0
+    
+time_back_to_init : 10.0

@@ -28,6 +28,8 @@ ObjectTracker::ObjectTracker()
     NOT_FOUND_THRESHOLD(50),
     WAITING_THRESHOLD(5),
     INIT_POSE_INDEX(1),
+    INIT_PAN(0.0),
+    INIT_TILT(0.0),
     use_head_scan_(true),
     count_not_found_(0),
     on_tracking_(false),
@@ -41,7 +43,10 @@ ObjectTracker::ObjectTracker()
     object_stop_command_("teddy bear"),
     object_speak_command_("banana"),
     object_target_("cell phone"),
-    DEBUG_PRINT(true)
+    target_index_(0),
+    is_ready_to_demo_(false),
+    TIME_TO_BACK(10.0),
+    DEBUG_PRINT(false)
 {
   ros::NodeHandle param_nh("~");
   p_gain_ = param_nh.param("p_gain", 0.4);
@@ -50,12 +55,14 @@ ObjectTracker::ObjectTracker()
 
   // get config
   std::string default_config_path = ros::package::getPath(ROS_PACKAGE_NAME) + "/config/config.yaml";
-  getConfig(default_config_path);
+  config_path_ = param_nh.param("/config", default_config_path);
+  getConfig(config_path_);
 
   ROS_INFO_STREAM("Object tracking Gain : " << p_gain_ << ", " << i_gain_ << ", " << d_gain_);
 
   set_module_pub_ = nh_.advertise<std_msgs::String>("/robotis/enable_ctrl_module", 0);
-  head_joint_pub_ = nh_.advertise<sensor_msgs::JointState>("/robotis/head_control/set_joint_states_offset", 0);
+  head_offset_joint_pub_ = nh_.advertise<sensor_msgs::JointState>("/robotis/head_control/set_joint_states_offset", 0);
+  head_joint_pub_ = nh_.advertise<sensor_msgs::JointState>("/robotis/head_control/set_joint_states", 0);
   led_pub_ = nh_.advertise<robotis_controller_msgs::SyncWriteItem>("/robotis/sync_write_item", 0);
   motion_index_pub_ = nh_.advertise<std_msgs::Int32>("/robotis/action/page_num", 0);
   //  head_scan_pub_ = nh_.advertise<std_msgs::String>("/robotis/head_control/scan_command", 0);
@@ -65,7 +72,12 @@ ObjectTracker::ObjectTracker()
   buttuon_sub_ = nh_.subscribe("/robotis/open_cr/button", 1, &ObjectTracker::buttonHandlerCallback, this);
   //  ball_tracking_command_sub_ = nh_.subscribe("/ball_tracker/command", 1, &ObjectTracker::ballTrackerCommandCallback, this);
 
+  set_joint_module_client_ = nh_.serviceClient<robotis_controller_msgs::SetModule>("/robotis/set_present_ctrl_modules");
+
   test_sub_ = nh_.subscribe("/ros_command", 1, &ObjectTracker::getROSCommand, this);
+
+  last_found_time_ = ros::Time::now();
+  boost::thread timer_thread = boost::thread(boost::bind(&ObjectTracker::timerThread, this));
 }
 
 ObjectTracker::~ObjectTracker()
@@ -105,14 +117,20 @@ ObjectTracker::~ObjectTracker()
 
 void ObjectTracker::startTracking()
 {
+  // get config
+  getConfig(config_path_);
+
+  if(is_ready_to_demo_ == false)
+    readyToDemo();
+
   on_tracking_ = true;
-  ROS_INFO_COND(DEBUG_PRINT, "Start Object tracking");
+  ROS_INFO_STREAM("Start Object tracking - " << object_target_);
 }
 
 void ObjectTracker::stopTracking()
 {
   on_tracking_ = false;
-  ROS_INFO_COND(DEBUG_PRINT, "Stop Object tracking");
+  ROS_INFO("Stop Object tracking");
 
   object_current_pan_ = 0;
   object_current_tilt_ = 0;
@@ -170,6 +188,24 @@ int ObjectTracker::processTracking()
   // offset_rad : top-left(+, +), bottom-right(-, -)
   double x_error = 0.0, y_error = 0.0, ball_size = 0.0;
 
+  // handle RGB LED
+  if(tracking_status_ != tracking_status)
+  {
+    switch(tracking_status)
+    {
+      case ObjectTracker::Found:
+        setRGBLED(0x1F, 0x1F, 0x1F);
+        break;
+
+      case ObjectTracker::NotFound:
+        setRGBLED(0, 0, 0);
+        break;
+
+      default:
+        break;
+    }
+  }
+
   switch (tracking_status)
   {
   case NotFound:
@@ -195,7 +231,7 @@ int ObjectTracker::processTracking()
   }
 
   ROS_INFO_STREAM_COND(DEBUG_PRINT, "--------------------------------------------------------------");
-  ROS_INFO_STREAM_COND(DEBUG_PRINT, "Ball position : " << object_position_.x << " | " << object_position_.y);
+  ROS_INFO_STREAM_COND(DEBUG_PRINT, "Object position : " << object_position_.x << " | " << object_position_.y);
   ROS_INFO_STREAM_COND(DEBUG_PRINT, "Target angle : " << (x_error * 180 / M_PI) << " | " << (y_error * 180 / M_PI));
 
   ros::Time curr_time = ros::Time::now();
@@ -260,7 +296,7 @@ void ObjectTracker::publishHeadJoint(double pan, double tilt)
   head_angle_msg.position.push_back(pan);
   head_angle_msg.position.push_back(tilt);
 
-  head_joint_pub_.publish(head_angle_msg);
+  head_offset_joint_pub_.publish(head_angle_msg);
 }
 
 //void ObjectTracker::scanBall()
@@ -339,7 +375,22 @@ void ObjectTracker::buttonHandlerCallback(const std_msgs::String::ConstPtr &msg)
   }
   else if (msg->data == "mode")
   {
+    // get config
+    getConfig(config_path_);
 
+    // set module and go init pose
+    readyToDemo();
+
+    // look at init position
+    lookAtInit();
+  }
+  else if(msg->data == "user")
+  {
+    // change target index
+    target_index_ = (target_index_ + 1) % target_list_.size();
+    object_target_ = target_list_.at(target_index_);
+
+    ROS_INFO_STREAM("Changed the target to : " << object_target_);
   }
 }
 
@@ -362,29 +413,62 @@ int ObjectTracker::getCommandFromObject(const darknet_ros_msgs::BoundingBoxes::C
 
 void ObjectTracker::getTargetFromMsg(const darknet_ros_msgs::BoundingBoxes::ConstPtr &msg)
 {
+  std::vector<geometry_msgs::Point> objects;
+
   for(int ix = 0; ix < msg->bounding_boxes.size(); ix++)
   {
     darknet_ros_msgs::BoundingBox& bounding_box = (darknet_ros_msgs::BoundingBox&) (msg->bounding_boxes[ix]);
     // darknet_ros_msgs::BoundingBox *bounding_box = static_cast<darknet_ros_msgs::BoundingBox*>(&(msg->bounding_boxes[ix]));
     if(bounding_box.Class == object_target_)
     {
-      prev_position_ = object_position_;
+      geometry_msgs::Point recog_object;
 
-      object_position_.x = (bounding_box.xmax + bounding_box.xmin) / 1280.0 - 1.0;
-      object_position_.y = (bounding_box.ymax + bounding_box.ymin) / 720.0 - 1.0;
+      recog_object.x = (bounding_box.xmax + bounding_box.xmin) / 1280.0 - 1.0;
+      recog_object.y = (bounding_box.ymax + bounding_box.ymin) / 720.0 - 1.0;
 
-      double object_x = abs(bounding_box.xmax - bounding_box.xmin);
-      double object_y = abs(bounding_box.ymax - bounding_box.ymin);
-      object_position_.z = sqrt(object_x * object_x + object_y * object_y);
+      //      double object_x = abs(bounding_box.xmax - bounding_box.xmin);
+      //      double object_y = abs(bounding_box.ymax - bounding_box.ymin);
+      //      recog_object.z = sqrt(object_x * object_x + object_y * object_y);
+
+      recog_object.z = getDistance(bounding_box.xmax, bounding_box.ymax, bounding_box.xmin, bounding_box.ymin);
 
       ROS_ERROR_COND(DEBUG_PRINT, "Found Object");
+      objects.push_back(recog_object);
 
-      return;
+      //return;
     }
   }
 
-  object_position_.z = -1;
+  prev_position_ = object_position_;
 
+  switch(objects.size())
+  {
+  case 0:
+    object_position_.z = -1;
+    return;
+
+  case 1:
+    object_position_ = objects.front();
+    break;
+
+  default:
+    // check the closest object with prev position
+    double min_distance = -1;
+    for(std::vector<geometry_msgs::Point>::iterator iter = objects.begin(); iter != objects.end(); ++iter)
+    {
+      double distance = getDistance(iter->x, iter->y, prev_position_.x, prev_position_.y);
+      if(min_distance == -1 || min_distance > distance)
+      {
+        min_distance = distance;
+        object_position_ = *iter;
+      }
+    }
+
+    break;
+  }
+
+  // set last found time
+  last_found_time_ = ros::Time::now();
 }
 
 // test
@@ -413,7 +497,16 @@ void ObjectTracker::getConfig(const std::string &config_path)
     YAML::Node object_node = doc["object"];
     object_start_command_ = object_node["start_command"].as<std::string>();
     object_stop_command_ = object_node["stop_command"].as<std::string>();
-    object_target_ = object_node["target"].as<std::string>();
+    target_list_ = object_node["target"].as< std::vector<std::string> >();
+    object_target_ = target_list_.at(target_index_);
+//    object_target_ = object_node["target"].as<std::string>();
+
+    YAML::Node demo_ready_node = doc["demo_ready"];
+    INIT_POSE_INDEX = demo_ready_node["motion_index"].as<int>();
+    INIT_PAN = demo_ready_node["head"]["pan"].as<double>() * M_PI / 180.0;
+    INIT_TILT = demo_ready_node["head"]["tilt"].as<double>() * M_PI / 180.0;
+
+    TIME_TO_BACK = doc["time_back_to_init"].as<double>();
 
     // example
     // for (YAML::iterator yaml_it = tar_pose_node.begin(); yaml_it != tar_pose_node.end(); ++yaml_it)
@@ -428,11 +521,22 @@ void ObjectTracker::getConfig(const std::string &config_path)
 
 void ObjectTracker::setModule(const std::string &module_name)
 {
-  // set module to direct_control_module for this demonsration
-  std_msgs::String module_msg;
-  module_msg.data = module_name;
+  //  // set module to direct_control_module for this demonsration
+  //  std_msgs::String module_msg;
+  //  module_msg.data = module_name;
 
-  set_module_pub_.publish(module_msg);
+  //  set_module_pub_.publish(module_msg);
+
+  robotis_controller_msgs::SetModule set_module_srv;
+  set_module_srv.request.module_name = module_name;
+
+  if (set_joint_module_client_.call(set_module_srv) == false)
+  {
+    ROS_ERROR("Failed to set module");
+    return;
+  }
+
+  return ;
 }
 
 void ObjectTracker::setLED(const int led_value)
@@ -440,6 +544,18 @@ void ObjectTracker::setLED(const int led_value)
 
   robotis_controller_msgs::SyncWriteItem syncwrite_msg;
   syncwrite_msg.item_name = "LED";
+  syncwrite_msg.joint_name.push_back("open-cr");
+  syncwrite_msg.value.push_back(led_value);
+
+  led_pub_.publish(syncwrite_msg);
+}
+
+void ObjectTracker::setRGBLED(int blue, int green, int red)
+{
+  int led_full_unit = 0x1F;
+  int led_value = (blue & led_full_unit) << 10 | (green & led_full_unit) << 5 | (red & led_full_unit);
+  robotis_controller_msgs::SyncWriteItem syncwrite_msg;
+  syncwrite_msg.item_name = "LED_RGB";
   syncwrite_msg.joint_name.push_back("open-cr");
   syncwrite_msg.value.push_back(led_value);
 
@@ -458,6 +574,21 @@ void ObjectTracker::readyToDemo()
 
   // set to head_control_module
   setModule("head_control_module");
+
+  is_ready_to_demo_ = true;
+}
+
+void ObjectTracker::lookAtInit()
+{
+  sensor_msgs::JointState head_angle_msg;
+
+  head_angle_msg.name.push_back("head_pan");
+  head_angle_msg.name.push_back("head_tilt");
+
+  head_angle_msg.position.push_back(INIT_PAN);
+  head_angle_msg.position.push_back(INIT_TILT);
+
+  head_joint_pub_.publish(head_angle_msg);
 }
 
 void ObjectTracker::playMotion(int motion_index)
@@ -466,6 +597,40 @@ void ObjectTracker::playMotion(int motion_index)
   motion_msg.data = motion_index;
 
   motion_index_pub_.publish(motion_msg);
+}
+
+double ObjectTracker::getDistance(double x, double y, double a, double b)
+{
+  double delta_x = x - a;
+  double delta_y = y - b;
+  return sqrt(delta_x * delta_x + delta_y * delta_y);
+}
+
+void ObjectTracker::timerThread()
+{
+  //set node loop rate
+  ros::Rate loop_rate(25);
+
+  //node loop
+  while (ros::ok())
+  {
+    if(on_tracking_ == true)
+    {
+      // check last found flag
+      ros::Duration found_dur = ros::Time::now() - last_found_time_;
+
+      double time_from_last_found = found_dur.toSec();
+
+      if(time_from_last_found >= TIME_TO_BACK)
+      {
+        // handle for waiting
+        lookAtInit();
+      }
+    }
+
+    //relax to fit output rate
+    loop_rate.sleep();
+  }
 }
 
 }

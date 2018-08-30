@@ -19,17 +19,20 @@
 #ifndef OBJECT_TRACKING_H_
 #define OBJECT_TRACKING_H_
 
-#include <math.h>
 #include <ros/ros.h>
 #include <ros/package.h>
 #include <std_msgs/String.h>
 #include <std_msgs/Int32.h>
 #include <sensor_msgs/JointState.h>
 #include <geometry_msgs/Point.h>
+
+#include <math.h>
+#include <boost/thread.hpp>
 #include <yaml-cpp/yaml.h>
 
 #include "darknet_ros_msgs/BoundingBoxes.h"
 #include "robotis_controller_msgs/SyncWriteItem.h"
+#include "robotis_controller_msgs/SetModule.h"
 
 namespace robotis_op
 {
@@ -91,11 +94,16 @@ protected:
   const int NOT_FOUND_THRESHOLD;
   const int WAITING_THRESHOLD;
   const bool DEBUG_PRINT;
-  const int INIT_POSE_INDEX;
+  int INIT_POSE_INDEX;
+  double INIT_PAN;
+  double INIT_TILT;
+  double TIME_TO_BACK;
   std::string object_start_command_;
   std::string object_stop_command_;
   std::string object_speak_command_;
   std::string object_target_;
+  std::vector<std::string> target_list_;
+  int target_index_;
 
   void objectCallback(const darknet_ros_msgs::BoundingBoxes::ConstPtr &msg);
   void buttonHandlerCallback(const std_msgs::String::ConstPtr &msg);
@@ -107,9 +115,15 @@ protected:
   void getConfig(const std::string &config_path);
   void setModule(const std::string &module_name);
   void setLED(const int led_value);
+  void setRGBLED(int blue, int green, int red);
 
   void readyToDemo();
+  void lookAtInit();
   void playMotion(int motion_index);
+
+  double getDistance(double x, double y, double a, double b);
+
+  void timerThread();
 
   // test code
   void getROSCommand(const std_msgs::String::ConstPtr &msg);
@@ -121,6 +135,7 @@ protected:
   ros::Publisher set_module_pub_;
   ros::Publisher module_control_pub_;
   ros::Publisher head_joint_pub_;
+  ros::Publisher head_offset_joint_pub_;
   ros::Publisher led_pub_;
   ros::Publisher motion_index_pub_;
   ros::Publisher head_scan_pub_;
@@ -131,11 +146,14 @@ protected:
 
   ros::Subscriber test_sub_;
 
+  ros::ServiceClient set_joint_module_client_;
+
   // (x, y) is the center position of the ball in image coordinates
   // z is the ball radius
   geometry_msgs::Point object_position_;
   geometry_msgs::Point prev_position_;
 
+  std::string config_path_;
   int tracking_status_;
   bool use_head_scan_;
   int count_not_found_;
@@ -145,6 +163,8 @@ protected:
   double x_error_sum_, y_error_sum_;
   ros::Time prev_time_;
   double p_gain_, d_gain_, i_gain_;
+  bool is_ready_to_demo_;
+  ros::Time last_found_time_;
 
 };
 }
